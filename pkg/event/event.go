@@ -496,6 +496,7 @@ func (e *EventHandler) UpdateClockStateMetrics(state PTPState, process, iFace st
 		e.clockMetric.With(labels).Set(3)
 	}
 }
+
 func (e *EventHandler) updateMetrics(cfgName string, process EventSource, processData map[ValueType]int64) {
 	if dataArray, ok := e.data[cfgName]; ok { //  create metric for the data that was captured
 		for _, d := range dataArray {
