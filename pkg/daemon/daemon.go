@@ -38,6 +38,7 @@ const (
 	GPSDDefaultGNSSSerialPort       = "/dev/gnss0"
 	NMEASourceDisabledIndicator     = "nmea source timed out"
 	InvalidMasterTimestampIndicator = "ignoring invalid master time stamp"
+	PTP_HA_IDENTIFIER               = "haProfiles"
 )
 
 // ProcessManager manages a set of ptpProcess
@@ -272,6 +273,15 @@ func (dn *Daemon) applyNodePTPProfiles() error {
 	glog.Infof("updating NodePTPProfiles to:")
 	runID := 0
 	slices.SortFunc(dn.ptpUpdate.NodeProfiles, func(a, b ptpv1.PtpProfile) int {
+		aHasPhc2sysOpts := a.Phc2sysOpts != nil && *a.Phc2sysOpts != ""
+		bHasPhc2sysOpts := b.Phc2sysOpts != nil && *b.Phc2sysOpts != ""
+		//sorted in ascending order
+		// here having phc2sysOptions is considered a high number
+		if !aHasPhc2sysOpts && bHasPhc2sysOpts {
+			return -1 //  a<b return -1
+		} else if aHasPhc2sysOpts && !bHasPhc2sysOpts {
+			return 1 //  a>b return
+		}
 		return cmp.Compare(*a.Name, *b.Name)
 	})
 	for _, profile := range dn.ptpUpdate.NodeProfiles {
@@ -352,14 +362,20 @@ func printNodeProfile(nodeProfile *ptpv1.PtpProfile) {
 	glog.Infof("------------------------------------")
 }
 
+/*
+update: March 7th 2024
+To support PTP HA phc2sys profile is appended to the end
+since phc2sysOpts needs to collect profile information from applied
+ptpconfig profiles for ptp4l
+*/
 func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) error {
 
 	dn.pluginManager.OnPTPConfigChange(nodeProfile)
 
-	ptp_processes := []string{
-		ts2phcProcessName,
-		ptp4lProcessName,
-		phcProcessName,
+	ptpProcesses := []string{
+		ts2phcProcessName,  // there can be only one ts2phc process in the system
+		ptp4lProcessName,   // there could be more than one ptp4l in the system
+		phc2sysProcessName, // there can be only one phc2sys process in the system
 	}
 
 	var err error
@@ -373,7 +389,7 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 	var cmd *exec.Cmd
 	var pProcess string
 
-	for _, p := range ptp_processes {
+	for _, p := range ptpProcesses {
 		pProcess = p
 		switch pProcess {
 		case ptp4lProcessName:
@@ -387,13 +403,16 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 			configFile = fmt.Sprintf("ptp4l.%d.config", runID)
 			configPath = fmt.Sprintf("/var/run/%s", configFile)
 			messageTag = fmt.Sprintf("[ptp4l.%d.config]", runID)
-		case phcProcessName:
+		case phc2sysProcessName:
 			configInput = nodeProfile.Phc2sysConf
 			configOpts = nodeProfile.Phc2sysOpts
-			socketPath = fmt.Sprintf("/var/run/ptp4l.%d.socket", runID)
+			if _, ok := (*nodeProfile).PtpSettings[PTP_HA_IDENTIFIER]; !ok {
+				socketPath = fmt.Sprintf("/var/run/ptp4l.%d.socket", runID)
+			}
 			configFile = fmt.Sprintf("phc2sys.%d.config", runID)
 			configPath = fmt.Sprintf("/var/run/%s", configFile)
 			messageTag = fmt.Sprintf("[ptp4l.%d.config]", runID)
+
 		case ts2phcProcessName:
 			configInput = nodeProfile.Ts2PhcConf
 			configOpts = nodeProfile.Ts2PhcOpts
@@ -430,7 +449,10 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 		for index, section := range output.sections {
 			if section.sectionName == "[global]" {
 				section.options["message_tag"] = messageTag
-				section.options["uds_address"] = socketPath
+				// if ha profile is mentioned then you don't need uds_address here
+				if _, ok := (*nodeProfile).PtpSettings[PTP_HA_IDENTIFIER]; !ok {
+					section.options["uds_address"] = socketPath
+				}
 				if gnssSerialPort, ok := section.options["ts2phc.nmea_serialport"]; ok {
 					output.gnss_serial_port = strings.TrimSpace(gnssSerialPort)
 					section.options["ts2phc.nmea_serialport"] = GPSPIPE_SERIALPORT
@@ -450,8 +472,11 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 			*configInput = configOutput
 		}
 
-		cmdLine = fmt.Sprintf("/usr/sbin/%s -f %s  %s ", p, configPath, *configOpts)
+		cmdLine = fmt.Sprintf("/usr/sbin/%s -f %s  %s ", pProcess, configPath, *configOpts)
 		cmdLine = addScheduling(nodeProfile, cmdLine)
+		if pProcess == phc2sysProcessName {
+			cmdLine = dn.applyHaProfiles(nodeProfile, cmdLine)
+		}
 		args := strings.Split(cmdLine, " ")
 		cmd = exec.Command(args[0], args[1:]...)
 
@@ -570,10 +595,11 @@ func (dn *Daemon) applyNodePtpProfile(runID int, nodeProfile *ptpv1.PtpProfile) 
 			printNodeProfile(nodeProfile)
 			return fmt.Errorf("failed to write the configuration file named %s: %v", configPath, err)
 		}
+
 		printNodeProfile(nodeProfile)
 		dn.processManager.process = append(dn.processManager.process, &dprocess)
-	}
 
+	}
 	return nil
 }
 
@@ -594,6 +620,7 @@ func (dn *Daemon) GetPhaseOffsetPinFilter(nodeProfile *ptpv1.PtpProfile) map[str
 	return phaseOffsetPinFilter
 }
 
+// HandlePmcTicker  ....
 func (dn *Daemon) HandlePmcTicker() {
 	for _, p := range dn.processManager.process {
 		if p.name == ptp4lProcessName {
@@ -844,6 +871,7 @@ func (p *ptpProcess) cmdStop() {
 			return
 		}
 	}
+	glog.Infof("removing config path %s for %s ", p.ptp4lConfigPath, p.name)
 	if p.ptp4lConfigPath != "" {
 		err := os.Remove(p.ptp4lConfigPath)
 		if err != nil {
@@ -919,5 +947,27 @@ func (p *ptpProcess) ProcessTs2PhcEvents(ptpOffset float64, source string, iface
 			updateClockStateMetrics(p.name, iface, FREERUN)
 		}
 	}
+}
 
+func (dn *Daemon) applyHaProfiles(nodeProfile *ptpv1.PtpProfile, cmdLine string) string {
+	if profiles, ok := (*nodeProfile).PtpSettings[PTP_HA_IDENTIFIER]; ok {
+		haProfiles := strings.Split(profiles, ",")
+		updateHaProfileToSocketPath := make([]string, 0, len(haProfiles)-1)
+		for _, profileName := range haProfiles {
+			if strings.TrimSpace(profileName) != "" {
+			next:
+				for _, dmProcess := range dn.processManager.process {
+					if strings.TrimSpace(*dmProcess.nodeProfile.Name) == strings.TrimSpace(profileName) {
+						updateHaProfileToSocketPath = append(updateHaProfileToSocketPath, "-z "+dmProcess.ptp4lSocketPath)
+						continue next
+					}
+				}
+			}
+		}
+		if len(updateHaProfileToSocketPath) > 1 {
+			cmdLine = fmt.Sprintf("%s %s", cmdLine, strings.Join(updateHaProfileToSocketPath, " "))
+		}
+	}
+	glog.Infof(cmdLine)
+	return cmdLine
 }
