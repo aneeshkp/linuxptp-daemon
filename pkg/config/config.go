@@ -67,7 +67,7 @@ func (i *IFaces) String() string {
 func GetKubeConfig() (*rest.Config, error) {
 	configFromFlags := func(kubeConfig string) (*rest.Config, error) {
 		if _, err := os.Stat(kubeConfig); err != nil {
-			return nil, fmt.Errorf("Cannot stat kubeconfig '%s'", kubeConfig)
+			return nil, fmt.Errorf("cannot start kubeconfig '%s'", kubeConfig)
 		}
 		return clientcmd.BuildConfigFromFlags("", kubeConfig)
 	}
