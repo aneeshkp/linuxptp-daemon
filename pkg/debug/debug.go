@@ -2,6 +2,7 @@ package debug
 
 import (
 	"fmt"
+	"github.com/golang/glog"
 	"strings"
 )
 
@@ -139,6 +140,7 @@ func printTree(root Node, rootChildren map[Node][]Node) {
 
 // PrintTree prints the tree if all required keys are present
 func PrintTree() {
+	glog.Info("Printing tree")
 	if !hasAllKeys(requiredKeys) {
 		return
 	}

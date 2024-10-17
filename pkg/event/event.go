@@ -353,13 +353,8 @@ func (e *EventHandler) updateGMState(cfgName string) grandMasterSyncState {
 	switch dpllState {
 	case PTP_FREERUN:
 		e.gmSyncState[cfgName].state = dpllState
-		if e.outOfSpec {
-			// T-GM in holdover, out of holdover specification
-			e.gmSyncState[cfgName].clockClass = protocol.ClockClassOutOfSpec
-		} else { // from holdover it goes to out of spec to free run
-			// T-GM or T-BC in free-run mode
-			e.gmSyncState[cfgName].clockClass = protocol.ClockClassFreerun
-		}
+		// T-GM or T-BC in free-run mode
+		e.gmSyncState[cfgName].clockClass = protocol.ClockClassFreerun
 	case PTP_HOLDOVER:
 		e.gmSyncState[cfgName].state = dpllState
 		// T-GM in holdover, within holdover specification
@@ -694,13 +689,18 @@ connect:
 					}
 				}
 				sendUpdate := false
-				offset, found := event.Values["offset"]
-				if found {
-					clockAccuracy := fbprotocol.ClockAccuracyFromOffset(time.Duration(offset.(int)) * time.Nanosecond)
-					if clockAccuracy != gmState.clockAccuracy {
-						sendUpdate = true
+				//   on phase offset changes update clock accuracy
+				if event.ProcessName == DPLL {
+					if offset, found := event.Values[OFFSET]; found {
+						offsetValue, ok := offset.(int64)
+						if ok {
+							clockAccuracy := fbprotocol.ClockAccuracyFromOffset(time.Duration(offsetValue) * time.Nanosecond)
+							if clockAccuracy != gmState.clockAccuracy {
+								sendUpdate = true
+							}
+							gmState.clockAccuracy = clockAccuracy
+						}
 					}
-					gmState.clockAccuracy = clockAccuracy
 				}
 
 				if e.clockClass != protocol.ClockClassUninitialized &&
@@ -721,7 +721,7 @@ connect:
 						}
 					}()
 				}
-			} // end of GM congition
+			} // end of GM condition
 			if len(logOut) > 0 {
 				if e.stdoutToSocket {
 					for _, l := range logOut {
@@ -825,8 +825,7 @@ func (e *EventHandler) GetPTPState(source EventSource, cfgName string) PTPState 
 
 // UpdateClockStateMetrics ...
 func (e *EventHandler) UpdateClockStateMetrics(state PTPState, process, iFace string) {
-	labels := prometheus.Labels{}
-	labels = prometheus.Labels{
+	labels := prometheus.Labels{
 		"process": process, "node": e.nodeName, "iface": iFace}
 	if state == PTP_LOCKED {
 		e.clockMetric.With(labels).Set(1)
@@ -908,7 +907,7 @@ func (e *EventHandler) updateMetrics(cfgName string, process EventSource, proces
 			s.Labels = map[string]string{"from": pName, "node": e.nodeName,
 				"process": string(process), "iface": iface}
 			s.Value = dataValue
-			d.Metrics[dataType].GaugeMetric.With(s.Labels).Set(dataValue)
+			d.Metrics[dataType].GaugeMetric.With(s.Labels).Set(s.Value)
 		}
 	}
 
@@ -973,6 +972,7 @@ func (e *EventHandler) addEvent(event EventChannel) *DataDetails {
 func (e *EventHandler) UpdateClockClass(c net.Conn, clk ClockClassRequest) {
 	classErr, clockClass := e.updateCLockClass(clk.cfgName, clk.clockClass, clk.clockType, clk.clockAccuracy,
 		PMCGMGetter, PMCGMSetter)
+	glog.Infof("received ANEESH %s,%v,%s,%v", clk.cfgName, clk.clockClass, clk.clockType, clk.clockAccuracy)
 	if classErr != nil {
 		glog.Errorf("error updating clock class %s", classErr)
 	} else {
